@@ -11,14 +11,31 @@
 #include <memory>
 
 #include "sensesp.h"
-#include "sensesp/sensors/analog_input.h"
-#include "sensesp/sensors/digital_input.h"
 #include "sensesp/sensors/sensor.h"
 #include "sensesp/signalk/signalk_output.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp_app_builder.h"
+#include "sensesp/transforms/lambda_transform.h"
+
+#include <SensirionI2cScd4x.h>
+#include <Wire.h>
 
 using namespace sensesp;
+
+#ifdef NO_ERROR
+#undef NO_ERROR
+#endif
+#define NO_ERROR 0
+
+static char errorMessage[64];
+static int16_t error;
+unsigned int co2_sample_interval = 5000;
+  
+struct scd40_data {
+    uint16_t concentration;
+    float temperature;
+    float relativeHumidity;
+};
 
 // The setup function performs one-time application initialization.
 void setup() {
@@ -28,7 +45,7 @@ void setup() {
   SensESPAppBuilder builder;
   sensesp_app = (&builder)
                     // Set a custom hostname for the app.
-                    ->set_hostname("my-sensesp-project")
+                    ->set_hostname("engineroom-monitor")
                     // Optionally, hard-code the WiFi and Signal K server
                     // settings. This is normally not needed.
                     //->set_wifi_client("My WiFi SSID", "my_wifi_password")
@@ -36,109 +53,91 @@ void setup() {
                     //->set_sk_server("192.168.10.3", 80)
                     ->get_app();
 
-  // GPIO number to use for the analog input
-  const uint8_t kAnalogInputPin = 36;
-  // Define how often (in milliseconds) new samples are acquired
-  const unsigned int kAnalogInputReadInterval = 500;
-  // Define the produced value at the maximum input voltage (3.3V).
-  // A value of 3.3 gives output equal to the input voltage.
-  const float kAnalogInputScale = 3.3;
+  SensirionI2cScd4x co2_sensor;
 
-  // Create a new Analog Input Sensor that reads an analog input pin
-  // periodically.
-  auto analog_input = std::make_shared<AnalogInput>(
-      kAnalogInputPin, kAnalogInputReadInterval, "", kAnalogInputScale);
+  Wire.setPins(16, 17);
+  Wire.begin();
+  co2_sensor.begin(Wire, SCD40_I2C_ADDR_62);
 
-  // Add an observer that prints out the current value of the analog input
-  // every time it changes.
-  analog_input->attach([analog_input]() {
-    debugD("Analog input value: %f", analog_input->get());
-  });
+  error = co2_sensor.wakeUp();
+  if (error != NO_ERROR) {
+    errorToString(error, errorMessage, sizeof errorMessage);
+    ESP_LOGE(__FILE__, "Error trying to execute wakeUp(): %s", errorMessage);
+  }
+  error = co2_sensor.stopPeriodicMeasurement();
+  if (error != NO_ERROR) {
+    errorToString(error, errorMessage, sizeof errorMessage);
+    ESP_LOGE(__FILE__, "Error trying to execute stopPeriodicMeasurement(): %s", errorMessage);
+  }
+  error = co2_sensor.reinit();
+  if (error != NO_ERROR) {
+    errorToString(error, errorMessage, sizeof errorMessage);
+    ESP_LOGE(__FILE__, "Error trying to execute reinit(): %s", errorMessage);
+  }
+  // Read out information about the sensor
+  uint64_t serialNumber;
+  error = co2_sensor.getSerialNumber(serialNumber);
+  if (error != NO_ERROR) {
+    errorToString(error, errorMessage, sizeof errorMessage);
+    ESP_LOGE(__FILE__, "Error trying to execute getSerialNumber(): %s", errorMessage);
+  }
+  ESP_LOGI(__FILE__, "serial number: %d", serialNumber);
 
-  // Set GPIO pin 15 to output and toggle it every 650 ms
+  error = co2_sensor.startPeriodicMeasurement();
+  if (error != NO_ERROR) {
+    errorToString(error, errorMessage, sizeof errorMessage);
+    ESP_LOGE(__FILE__, "Error trying to execute startPeriodicMeasurement(): %s", errorMessage);
+  }
 
-  const uint8_t kDigitalOutputPin = 15;
-  const unsigned int kDigitalOutputInterval = 650;
-  pinMode(kDigitalOutputPin, OUTPUT);
-  event_loop()->onRepeat(kDigitalOutputInterval, [kDigitalOutputPin]() {
-    digitalWrite(kDigitalOutputPin, !digitalRead(kDigitalOutputPin));
-  });
+  auto co2_callback = [&]() -> scd40_data {
+    bool dataReady = false;
+    scd40_data result;
+    static scd40_data lastGoodResult = {0, 0.0, 0.0};
 
-  // Read GPIO 14 every time it changes
+    error = co2_sensor.getDataReadyStatus(dataReady);
+    if (error != NO_ERROR) {
+        errorToString(error, errorMessage, sizeof errorMessage);
+        ESP_LOGE(__FILE__, "Error trying to execute getDataReadyStatus(): %s");
+    }
 
-  const uint8_t kDigitalInput1Pin = 14;
-  auto digital_input1 = std::make_shared<DigitalInputChange>(
-      kDigitalInput1Pin, INPUT_PULLUP, CHANGE);
+    if (dataReady)
+    {
+      error = co2_sensor.readMeasurement(result.concentration, result.temperature, result.relativeHumidity);
+      if (error != NO_ERROR) {
+        errorToString(error, errorMessage, sizeof errorMessage);
+        ESP_LOGE(__FILE__, "Error trying to execute readMeasurement(): %s");
+      }
+      else
+        lastGoodResult = result;
+        return result;
+    }
 
-  // Connect the digital input to a lambda consumer that prints out the
-  // value every time it changes.
+    return lastGoodResult;
+  };
 
-  // Test this yourself by connecting pin 15 to pin 14 with a jumper wire and
-  // see if the value changes!
+  auto concentrationTransform = new LambdaTransform<scd40_data, uint16_t>([] (scd40_data data) -> uint16_t { return data.concentration; });
+  auto temperatureTransform = new LambdaTransform<scd40_data, float>([] (scd40_data data) -> float { return data.temperature + 272.15; });
+  auto humidityTransform = new LambdaTransform<scd40_data, float>([] (scd40_data data) -> float { return data.relativeHumidity / 100.0; });
 
-  auto digital_input1_consumer = std::make_shared<LambdaConsumer<bool>>(
-      [](bool input) { debugD("Digital input value changed: %d", input); });
+  auto* engine_room_co2 = new RepeatSensor<scd40_data>(co2_sample_interval, co2_callback);
+  const char* co2_path = "environment.inside.engineRoom.co2Concentration";
+  const char* temperature_path = "environment.inside.engineRoom.temperature";
+  const char* humidity_path = "environment.inside.engineRoom.relativeHumidity";
+  engine_room_co2->connect_to(concentrationTransform)->connect_to(new SKOutputInt(co2_path));
+  engine_room_co2->connect_to(temperatureTransform)->connect_to(new SKOutputFloat(temperature_path));
+  engine_room_co2->connect_to(humidityTransform)->connect_to(new SKOutputFloat(humidity_path));
 
-  digital_input1->connect_to(digital_input1_consumer);
-
-  // Create another digital input, this time with RepeatSensor. This approach
-  // can be used to connect external sensor library to SensESP!
-
-  const uint8_t kDigitalInput2Pin = 13;
-  const unsigned int kDigitalInput2Interval = 1000;
-
-  // Configure the pin. Replace this with your custom library initialization
-  // code!
-  pinMode(kDigitalInput2Pin, INPUT_PULLUP);
-
-  // Define a new RepeatSensor that reads the pin every 100 ms.
-  // Replace the lambda function internals with the input routine of your custom
-  // library.
-
-  // Again, test this yourself by connecting pin 15 to pin 13 with a jumper
-  // wire and see if the value changes!
-
-  auto digital_input2 = std::make_shared<RepeatSensor<bool>>(
-      kDigitalInput2Interval,
-      [kDigitalInput2Pin]() { return digitalRead(kDigitalInput2Pin); });
-
-  // Connect the analog input to Signal K output. This will publish the
-  // analog input value to the Signal K server every time it changes.
-  auto aiv_metadata = std::make_shared<SKMetadata>("V", "Analog input voltage");
-  auto aiv_sk_output = std::make_shared<SKOutput<float>>(
-      "sensors.analog_input.voltage",   // Signal K path
-      "/Sensors/Analog Input/Voltage",  // configuration path, used in the
-                                        // web UI and for storing the
-                                        // configuration
-      aiv_metadata
-  );
-
-  ConfigItem(aiv_sk_output)
-      ->set_title("Analog Input Voltage SK Output Path")
-      ->set_description("The SK path to publish the analog input voltage")
-      ->set_sort_order(100);
-
-  analog_input->connect_to(aiv_sk_output);
-
-  // Connect digital input 2 to Signal K output.
-  auto di2_metadata = std::make_shared<SKMetadata>("", "Digital input 2 value");
-  auto di2_sk_output = std::make_shared<SKOutput<bool>>(
-      "sensors.digital_input2.value",    // Signal K path
-      "/Sensors/Digital Input 2/Value",  // configuration path
-      di2_metadata
-  );
-
-  ConfigItem(di2_sk_output)
-      ->set_title("Digital Input 2 SK Output Path")
-      ->set_sort_order(200);
-
-  digital_input2->connect_to(di2_sk_output);
-
+  
+    
   // To avoid garbage collecting all shared pointers created in setup(),
   // loop from here.
   while (true) {
     loop();
   }
 }
+
+
+
+
 
 void loop() { event_loop()->tick(); }
