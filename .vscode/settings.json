@@ -1,0 +1,10 @@
+{
+    "idf.currentSetup": "c:\\Users\\johnd\\esp\\v5.5.1\\esp-idf",
+    "idf.flashType": "DFU",
+    "idf.portWin": "COM6",
+    "idf.monitorPort": "COM6",
+    "idf.openOcdConfigs": [
+        "interface/ftdi/esp32_devkitj_v1.cfg",
+        "target/esp32.cfg"
+    ]
+}
