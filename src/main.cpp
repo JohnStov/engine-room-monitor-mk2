@@ -16,10 +16,15 @@
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp_app_builder.h"
 #include "sensesp/transforms/lambda_transform.h"
+#include "sensesp/transforms/linear.h"
+
 
 #include <SensirionI2cScd4x.h>
 #include <MICS6814Wrapper.h>
 #include <Wire.h>
+#include "sensesp_onewire/onewire_temperature.h"
+
+using namespace sensesp::onewire;
 
 using namespace sensesp;
 
@@ -30,7 +35,7 @@ using namespace sensesp;
 
 static char errorMessage[64];
 static int16_t error;
-unsigned int co2_sample_interval = 5000;
+unsigned int sample_interval = 5000;
   
 struct scd40_data {
     uint16_t concentration;
@@ -60,6 +65,7 @@ void setup() {
 
   SensirionI2cScd4x co2Sensor;
   MICS6814Wrapper mics6814(false, 0x18);
+  DallasTemperatureSensors* dts = new DallasTemperatureSensors(4);
   
   co2Sensor.begin(Wire, SCD40_I2C_ADDR_62);
 
@@ -123,7 +129,7 @@ void setup() {
   auto temperatureTransform = new LambdaTransform<scd40_data, float>([] (scd40_data data) -> float { return data.temperature + 272.15; });
   auto humidityTransform = new LambdaTransform<scd40_data, float>([] (scd40_data data) -> float { return data.relativeHumidity / 100.0; });
 
-  auto* engine_room_co2 = new RepeatSensor<scd40_data>(co2_sample_interval, co2_callback);
+  auto* engine_room_co2 = new RepeatSensor<scd40_data>(sample_interval, co2_callback);
   const char* co2_path = "environment.inside.engineRoom.co2Concentration";
   const char* temperature_path = "environment.inside.engineRoom.temperature";
   const char* humidity_path = "environment.inside.engineRoom.relativeHumidity";
@@ -143,13 +149,35 @@ void setup() {
   auto nh3Transform = new LambdaTransform<MICS6814::Reading, float>([] (MICS6814::Reading data) -> float { return data.nh3; });
   auto oxidisingTransform = new LambdaTransform<MICS6814::Reading, float>([] (MICS6814::Reading data) -> float { return data.oxidising; });
 
-  auto* engine_room_gases = new RepeatSensor<MICS6814::Reading>(co2_sample_interval, [&]()->MICS6814::Reading { return mics6814.read_all(); });
+  auto* engine_room_gases = new RepeatSensor<MICS6814::Reading>(sample_interval, [&]()->MICS6814::Reading { return mics6814.read_all(); });
   const char* reducing_path = "environment.inside.engineRoom.reducingGases";
   const char* nh3_path = "environment.inside.engineRoom.nh3";
   const char* oxidising_path = "environment.inside.engineRoom.oxidisingGases";
   engine_room_gases->connect_to(reducingTransform)->connect_to(new SKOutputFloat(reducing_path, "Ohms"));
   engine_room_gases->connect_to(nh3Transform)->connect_to(new SKOutputFloat(nh3_path, "Ohms"));
   engine_room_gases->connect_to(oxidisingTransform)->connect_to(new SKOutputFloat(oxidising_path, "Ohms"));
+
+  // Measure exhaust temperature
+  auto* exhaust_temp =
+      new OneWireTemperature(dts, sample_interval, "/exhaustTemperature/oneWire");
+  auto* exhaust_temp_calibration =
+      new Linear(1.0, 0.0, "/exhaustTemperature/linear");
+  auto* exhaust_temp_sk_output = new SKOutputFloat(
+      "propulsion.port.exhaustTemperature", "/exhaustTemperature/skPath", "K");
+
+  exhaust_temp->connect_to(exhaust_temp_calibration)
+      ->connect_to(exhaust_temp_sk_output);
+
+  // Measure alternator temperature
+  auto* alternator_temp =
+      new OneWireTemperature(dts, sample_interval, "/AlternatorTemperature/oneWire");
+  auto* alternator_temp_calibration =
+      new Linear(1.0, 0.0, "/AlternatorTemperature/linear");
+  auto* alternator_temp_sk_output = new SKOutputFloat(
+      "electrical.alternators.0.temperature", "/alternatorTemperature/skPath", "K");
+
+  alternator_temp->connect_to(alternator_temp_calibration)
+      ->connect_to(alternator_temp_sk_output);
   
   // To avoid garbage collecting all shared pointers created in setup(),
   // loop from here.
