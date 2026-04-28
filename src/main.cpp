@@ -18,6 +18,7 @@
 #include "sensesp/transforms/lambda_transform.h"
 
 #include <SensirionI2cScd4x.h>
+#include <MICS6814Wrapper.h>
 #include <Wire.h>
 
 using namespace sensesp;
@@ -53,37 +54,40 @@ void setup() {
                     //->set_sk_server("192.168.10.3", 80)
                     ->get_app();
 
-  SensirionI2cScd4x co2_sensor;
-
   Wire.setPins(16, 17);
   Wire.begin();
-  co2_sensor.begin(Wire, SCD40_I2C_ADDR_62);
 
-  error = co2_sensor.wakeUp();
+
+  SensirionI2cScd4x co2Sensor;
+  MICS6814Wrapper mics6814(false, 0x18);
+  
+  co2Sensor.begin(Wire, SCD40_I2C_ADDR_62);
+
+  error = co2Sensor.wakeUp();
   if (error != NO_ERROR) {
     errorToString(error, errorMessage, sizeof errorMessage);
     ESP_LOGE(__FILE__, "Error trying to execute wakeUp(): %s", errorMessage);
   }
-  error = co2_sensor.stopPeriodicMeasurement();
+  error = co2Sensor.stopPeriodicMeasurement();
   if (error != NO_ERROR) {
     errorToString(error, errorMessage, sizeof errorMessage);
     ESP_LOGE(__FILE__, "Error trying to execute stopPeriodicMeasurement(): %s", errorMessage);
   }
-  error = co2_sensor.reinit();
+  error = co2Sensor.reinit();
   if (error != NO_ERROR) {
     errorToString(error, errorMessage, sizeof errorMessage);
     ESP_LOGE(__FILE__, "Error trying to execute reinit(): %s", errorMessage);
   }
   // Read out information about the sensor
   uint64_t serialNumber;
-  error = co2_sensor.getSerialNumber(serialNumber);
+  error = co2Sensor.getSerialNumber(serialNumber);
   if (error != NO_ERROR) {
     errorToString(error, errorMessage, sizeof errorMessage);
     ESP_LOGE(__FILE__, "Error trying to execute getSerialNumber(): %s", errorMessage);
   }
   ESP_LOGI(__FILE__, "serial number: %d", serialNumber);
 
-  error = co2_sensor.startPeriodicMeasurement();
+  error = co2Sensor.startPeriodicMeasurement();
   if (error != NO_ERROR) {
     errorToString(error, errorMessage, sizeof errorMessage);
     ESP_LOGE(__FILE__, "Error trying to execute startPeriodicMeasurement(): %s", errorMessage);
@@ -94,7 +98,7 @@ void setup() {
     scd40_data result;
     static scd40_data lastGoodResult = {0, 0.0, 0.0};
 
-    error = co2_sensor.getDataReadyStatus(dataReady);
+    error = co2Sensor.getDataReadyStatus(dataReady);
     if (error != NO_ERROR) {
         errorToString(error, errorMessage, sizeof errorMessage);
         ESP_LOGE(__FILE__, "Error trying to execute getDataReadyStatus(): %s");
@@ -102,7 +106,7 @@ void setup() {
 
     if (dataReady)
     {
-      error = co2_sensor.readMeasurement(result.concentration, result.temperature, result.relativeHumidity);
+      error = co2Sensor.readMeasurement(result.concentration, result.temperature, result.relativeHumidity);
       if (error != NO_ERROR) {
         errorToString(error, errorMessage, sizeof errorMessage);
         ESP_LOGE(__FILE__, "Error trying to execute readMeasurement(): %s");
@@ -123,21 +127,35 @@ void setup() {
   const char* co2_path = "environment.inside.engineRoom.co2Concentration";
   const char* temperature_path = "environment.inside.engineRoom.temperature";
   const char* humidity_path = "environment.inside.engineRoom.relativeHumidity";
-  engine_room_co2->connect_to(concentrationTransform)->connect_to(new SKOutputInt(co2_path));
-  engine_room_co2->connect_to(temperatureTransform)->connect_to(new SKOutputFloat(temperature_path));
-  engine_room_co2->connect_to(humidityTransform)->connect_to(new SKOutputFloat(humidity_path));
+  engine_room_co2->connect_to(concentrationTransform)->connect_to(new SKOutputInt(co2_path, "PPM"));
+  engine_room_co2->connect_to(temperatureTransform)->connect_to(new SKOutputFloat(temperature_path, "K"));
+  engine_room_co2->connect_to(humidityTransform)->connect_to(new SKOutputFloat(humidity_path, "%"))->connect_to(new LambdaConsumer<float>([&](float val){ mics6814.set_led(0, 31, 0); delay(200); mics6814.set_led(63, 0, 0); return;}));
 
+
+  if (!mics6814.init()) {
+    ESP_LOGE(__FILE__, "Failed to initialize the gas sensor");
+  }
+
+  mics6814.set_heater(true);
+  mics6814.set_led(31, 31, 31);
+
+  auto reducingTransform = new LambdaTransform<MICS6814::Reading, float>([] (MICS6814::Reading data) -> uint16_t { return data.reducing; });
+  auto nh3Transform = new LambdaTransform<MICS6814::Reading, float>([] (MICS6814::Reading data) -> float { return data.nh3; });
+  auto oxidisingTransform = new LambdaTransform<MICS6814::Reading, float>([] (MICS6814::Reading data) -> float { return data.oxidising; });
+
+  auto* engine_room_gases = new RepeatSensor<MICS6814::Reading>(co2_sample_interval, [&]()->MICS6814::Reading { return mics6814.read_all(); });
+  const char* reducing_path = "environment.inside.engineRoom.reducingGases";
+  const char* nh3_path = "environment.inside.engineRoom.nh3";
+  const char* oxidising_path = "environment.inside.engineRoom.oxidisingGases";
+  engine_room_gases->connect_to(reducingTransform)->connect_to(new SKOutputFloat(reducing_path, "Ohms"));
+  engine_room_gases->connect_to(nh3Transform)->connect_to(new SKOutputFloat(nh3_path, "Ohms"));
+  engine_room_gases->connect_to(oxidisingTransform)->connect_to(new SKOutputFloat(oxidising_path, "Ohms"));
   
-    
   // To avoid garbage collecting all shared pointers created in setup(),
   // loop from here.
   while (true) {
     loop();
   }
 }
-
-
-
-
 
 void loop() { event_loop()->tick(); }
