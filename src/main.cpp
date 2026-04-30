@@ -53,7 +53,7 @@ void setup() {
                     ->set_hostname("engineroom-monitor")
                     // Optionally, hard-code the WiFi and Signal K server
                     // settings. This is normally not needed.
-                    ->set_wifi_client("SpringCottage", "!ginger&harry@springcottage!")
+                    //->set_wifi_client("MySSID", "my_password")
                     //->set_wifi_access_point("My AP SSID", "my_ap_password")
                     //->set_sk_server("192.168.10.3", 80)
                     ->get_app();
