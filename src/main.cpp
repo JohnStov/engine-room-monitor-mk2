@@ -133,9 +133,13 @@ void setup() {
   auto co2_output = new SKOutputInt("environment.inside.engineRoom.co2Concentration", new SKMetadata("ppm", "Engine room CO2 Concentration", "CO2 concentration in parts per million"));
   auto temperature_output = new SKOutputFloat("environment.inside.engineRoom.temperature", new SKMetadata("K", "Engine room temperature"));
   auto humidity_output = new SKOutputFloat("environment.inside.engineRoom.relativeHumidity", new SKMetadata("ratio", "Engine room relative humidity"));
+
+  auto temperature_calibration =
+      new Linear(1.0, 0.0, "/temperature/calibration");
+  ConfigItem(temperature_calibration)->set_title("Engine Room Temperature Calibration")->set_sort_order(900);
   
   engine_room_co2->connect_to(concentrationTransform)->connect_to(co2_output);
-  engine_room_co2->connect_to(temperatureTransform)->connect_to(temperature_output);
+  engine_room_co2->connect_to(temperatureTransform)->connect_to(temperature_calibration)->connect_to(temperature_output);
   engine_room_co2->connect_to(humidityTransform)->connect_to(humidity_output)->connect_to(new LambdaConsumer<float>([&](float val){ mics6814.set_led(0, 31, 0); delay(200); mics6814.set_led(63, 0, 0); return;}));
 
   if (!mics6814.init()) {
